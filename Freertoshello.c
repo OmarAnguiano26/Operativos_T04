@@ -20,6 +20,7 @@
 #include "board.h"
 #include "fsl_dspi.h"
 #include "text.h"
+#include "fsl_pit.h"
 
 /*******************************************************************************
  * Definitions
@@ -46,6 +47,9 @@
  * Variables
  ******************************************************************************/
 volatile uint32_t g_systickCounter  = 20U;
+
+volatile bool pitIsrFlag = false;
+
 
 #define MAX7219_SEG_NUM 1 // The number matrices.
 #define MAX7219_BUFFER_SIZE MAX7219_SEG_NUM * 8 // The size of the buffer
@@ -74,6 +78,51 @@ uint8_t pattern_smileyface[] = { // Smile face (:
 		0b00111100,
 };
 
+uint8_t pattern_up[] = { // Up
+		0b00010000,
+		0b00111000,
+		0b01111100,
+		0b11111110,
+		0b00010000,
+		0b00010000,
+		0b00010000,
+		0b00010000,
+};
+
+uint8_t pattern_left[] = { // left
+		0b00010000,
+		0b00110000,
+		0b01110000,
+		0b11111111,
+		0b01110000,
+		0b00110000,
+		0b00010000,
+		0b00000000,
+};
+
+uint8_t pattern_right[] = { // Right
+		0b00001000,
+		0b00001100,
+		0b00001110,
+		0b11111111,
+		0b00001110,
+		0b00001100,
+		0b00001000,
+		0b00000000,
+};
+
+uint8_t pattern_down[] = { // Down
+		0b00010000,
+		0b00010000,
+		0b00010000,
+		0b00010000,
+		0b11111110,
+		0b01111100,
+		0b00111000,
+		0b00010000,
+};
+
+
 uint8_t letterG[]={
 		0b00011100,
 		0b00100010,
@@ -97,28 +146,36 @@ static void Task_Backward(void *pvParameters);
 
 TaskHandle_t xHandle_Admin, xHandle_Left, xHandle_Right, xHandle_Forward, xHandle_Backward;
 
-void SysTick_Handler(void)
+//void SysTick_Handler(void)
+//{
+//    if (g_systickCounter != 0U)
+//    {
+//        g_systickCounter--;
+//    }
+//}
+
+void PIT0_IRQHandler(void)
 {
-    if (g_systickCounter != 0U)
-    {
-        g_systickCounter--;
-    }
+    /* Clear interrupt flag.*/
+    PIT_ClearStatusFlags(PIT, kPIT_Chnl_0, kPIT_TimerFlag);
+    pitIsrFlag = true;
+    /* Added for, and affects, all PIT handlers. For CPU clock which is much larger than the IP bus clock,
+     * CPU can run out of the interrupt handler before the interrupt flag being cleared, resulting in the
+     * CPU's entering the handler again and again. Adding DSB can prevent the issue from happening.
+     */
+    __DSB();
 }
 
 void delay_ms(uint16_t miliseconds)
 {
-	/* Delay to wait slave is ready */
-	if (SysTick_Config(SystemCoreClock / 1000U))
-	{
-		while (1)
-		{
-		}
-	}
-	/* Delay 100 ms */
-	g_systickCounter = miliseconds;
-	while (g_systickCounter != 0U)
+    PIT_SetTimerPeriod(PIT, kPIT_Chnl_0, USEC_TO_COUNT( (miliseconds*1000) , CLOCK_GetFreq(kCLOCK_BusClk)));
+	PIT_StartTimer(PIT, kPIT_Chnl_0);
+	while(!pitIsrFlag)
 	{
 	}
+	pitIsrFlag = false;
+	PIT_StopTimer(PIT, kPIT_Chnl_0);
+
 }
 
 /*Address - register where the data will the written*/
@@ -298,10 +355,10 @@ void drawFace(void)
 	return;
 }
 
-void drawText(void)
+void drawText(uint8_t array[])
 {
 	int row;
-	uint8_t *charPtr = letterG;
+	uint8_t *charPtr = array;
 	for (row = 1; row <= 8; row++)
 	{
 		//Draw a face
@@ -342,6 +399,10 @@ void cleanMatrix(void)
  */
 int main(void)
 {
+
+    /* Structure of initialize PIT */
+    pit_config_t pitConfig;
+
     /* Init board hardware. */
 	/* PORTD0 (J2-06) is configured as SPI0_PCS0 (CS) */
     /* PORTD1 (J2-12) is configured as SPI0_SCK  (CLK)*/
@@ -350,6 +411,18 @@ int main(void)
     BOARD_InitBootPins();
     BOARD_InitBootClocks();
     BOARD_InitDebugConsole();
+
+    /*
+     * pitConfig.enableRunInDebug = false;
+     */
+    PIT_GetDefaultConfig(&pitConfig);
+    PIT_Init(PIT, &pitConfig);
+    /* Set timer period for channel 0 */
+    PIT_SetTimerPeriod(PIT, kPIT_Chnl_0, USEC_TO_COUNT(2000000U, CLOCK_GetFreq(kCLOCK_BusClk)));
+    /* Enable timer interrupts for channel 0 */
+    PIT_EnableInterrupts(PIT, kPIT_Chnl_0, kPIT_TimerInterruptEnable);
+    /* Enable at the NVIC */
+    EnableIRQ(PIT0_IRQn);
 
     SPI_init();
     max7219_init(MAX7219_SEG_NUM, max7219_buffer, MAX7219_BUFFER_SIZE);
@@ -361,28 +434,28 @@ int main(void)
         while (1)
             ;
     }
-    if (xTaskCreate(Task_Left, "Left", configMINIMAL_STACK_SIZE + 100, NULL, hello_task_PRIORITY2, &xHandle_Left) !=
+    if (xTaskCreate(Task_Left, "Left", configMINIMAL_STACK_SIZE + 500, NULL, hello_task_PRIORITY2, &xHandle_Left) !=
         pdPASS)
     {
         PRINTF("Task creation failed!.\r\n");
         while (1)
             ;
     }
-    if (xTaskCreate(Task_Right, "Right", configMINIMAL_STACK_SIZE + 100, NULL, hello_task_PRIORITY3, &xHandle_Right) !=
+    if (xTaskCreate(Task_Right, "Right", configMINIMAL_STACK_SIZE + 500, NULL, hello_task_PRIORITY3, &xHandle_Right) !=
         pdPASS)
     {
         PRINTF("Task creation failed!.\r\n");
         while (1)
             ;
     }
-    if (xTaskCreate(Task_Forward, "Forward", configMINIMAL_STACK_SIZE + 100, NULL, hello_task_PRIORITY4, &xHandle_Forward) !=
+    if (xTaskCreate(Task_Forward, "Forward", configMINIMAL_STACK_SIZE + 500, NULL, hello_task_PRIORITY4, &xHandle_Forward) !=
         pdPASS)
     {
         PRINTF("Task creation failed!.\r\n");
         while (1)
             ;
     }
-    if (xTaskCreate(Task_Backward, "Backward", configMINIMAL_STACK_SIZE + 100, NULL, hello_task_PRIORITY5, &xHandle_Backward) !=
+    if (xTaskCreate(Task_Backward, "Backward", configMINIMAL_STACK_SIZE + 500, NULL, hello_task_PRIORITY5, &xHandle_Backward) !=
         pdPASS)
     {
         PRINTF("Task creation failed!.\r\n");
@@ -444,9 +517,10 @@ static void Task_Left(void *pvParameters)
     for (;;)
     {
     	vTaskSuspend(NULL);
-        PRINTF("Left\r\n");
-        //vTaskDelay(2000 / portTICK_PERIOD_MS);
-        for(int i = 0; i < 100000;i++){}
+        //PRINTF("Left\r\n");
+    	drawText(pattern_left);
+        //delay 2s
+    	delay_ms(2000);
     }
 }
 static void Task_Right(void *pvParameters)
@@ -454,26 +528,30 @@ static void Task_Right(void *pvParameters)
     for (;;)
     {
     	vTaskSuspend(NULL);
-        PRINTF("Right\r\n");
-       // vTaskDelay(2000 / portTICK_PERIOD_MS);
-        for(int i = 0; i < 100000;i++){}
+        //PRINTF("Right\r\n");
+    	drawText(pattern_right);
+        //delay 2s
+    	delay_ms(2000);
     }
 }static void Task_Forward(void *pvParameters)
 {
     for (;;)
     {
     	vTaskSuspend(NULL);
-        PRINTF("Forward\r\n");
-       // vTaskDelay(2000 / portTICK_PERIOD_MS);
-        for(int i = 0; i < 100000;i++){}
+        //PRINTF("Forward\r\n");
+        drawText(pattern_up);
+    	PIT_StartTimer(PIT, kPIT_Chnl_0);
+        //delay 2s
+    	delay_ms(2000);
     }
 }static void Task_Backward(void *pvParameters)
 {
     for (;;)
     {
     	vTaskSuspend(NULL);
-        PRINTF("Backward\r\n");
-        //vTaskDelay(2000 / portTICK_PERIOD_MS);
-        for(int i = 0; i < 100000;i++){}
+        //PRINTF("Backward\r\n");
+        drawText(pattern_down);
+        //delay 2s
+    	delay_ms(2000);
     }
 }
